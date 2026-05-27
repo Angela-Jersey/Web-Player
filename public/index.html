@@ -16,59 +16,112 @@
         <div class="status" id="status">连接中</div>
       </section>
 
-      <section class="stage">
-        <div class="dropzone" id="dropzone">
-          <input id="fileInput" type="file" accept="audio/*" />
-          <div class="disc" id="disc"></div>
-          <div>
-            <h2 id="trackName">上传一首音乐开始</h2>
-            <p id="trackMeta">支持 mp3、m4a、wav、ogg 等浏览器可播放格式</p>
+      <section class="layout">
+        <section class="stage">
+          <div class="dropzone" id="dropzone">
+            <input id="fileInput" type="file" accept="audio/*" multiple />
+            <div class="disc" id="disc"></div>
+            <div>
+              <h2 id="trackName">上传音乐开始</h2>
+              <p id="trackMeta">支持多选上传，上传后会自动进入播放列表</p>
+            </div>
+            <button id="chooseBtn" type="button">选择音频</button>
           </div>
-          <button id="chooseBtn" type="button">选择音频</button>
-        </div>
 
-        <div class="controls">
-          <button class="primary" id="playBtn" type="button" disabled>播放</button>
-          <button id="unlockBtn" type="button" disabled>启用声音</button>
-          <button id="syncBtn" type="button" disabled>重新同步</button>
-          <div class="time">
-            <span id="currentTime">0:00</span>
-            <input id="seek" type="range" min="0" max="1000" value="0" disabled />
-            <span id="duration">0:00</span>
-          </div>
-        </div>
+          <section class="panel playlist-panel">
+            <div class="panel-head">
+              <h2>播放列表</h2>
+            </div>
+            <div class="playlist" id="playlist"></div>
+          </section>
 
-        <div class="sync-panel" id="syncPanel">
-          <div>
-            <strong id="qualityText">等待同步</strong>
-            <span>同步质量</span>
-          </div>
-          <div>
-            <strong id="driftText">-- ms</strong>
-            <span>播放偏差</span>
-          </div>
-          <div>
-            <strong id="latencyText">-- ms</strong>
-            <span>网络往返</span>
-          </div>
-          <div>
-            <strong id="rateText">1.000x</strong>
-            <span>微调速度</span>
-          </div>
-        </div>
-      </section>
+          <section class="panel devices-panel">
+            <div class="panel-head">
+              <h2>在线设备</h2>
+              <button id="claimControllerBtn" type="button">接管主控</button>
+            </div>
+            <div class="devices" id="devices"></div>
+          </section>
 
-      <section class="notes">
-        <div>
-          <strong>主控设备</strong>
-          <span>上传音频后点播放、暂停或拖动进度，其他设备会跟随。</span>
-        </div>
-        <div>
-          <strong>加入设备</strong>
-          <span>首次进入只点“启用声音”，之后会自动跟随主控校准。</span>
-        </div>
+          <div class="controls">
+            <button id="prevBtn" type="button" disabled>上一首</button>
+            <button class="primary" id="playBtn" type="button" disabled>播放</button>
+            <button id="nextBtn" type="button" disabled>下一首</button>
+            <button class="mode-button" id="modeButton" type="button" disabled title="切换播放模式">⇉ 顺序</button>
+            <button id="unlockBtn" type="button" disabled>启用声音</button>
+            <button id="eqOpenBtn" type="button">开启均衡器</button>
+            <button id="syncBtn" type="button" disabled>重新同步</button>
+            <div class="time">
+              <span id="currentTime">0:00</span>
+              <input id="seek" type="range" min="0" max="1000" value="0" disabled />
+              <span id="duration">0:00</span>
+            </div>
+            <div class="volume">
+              <span>音量</span>
+              <input id="volumeSlider" type="range" min="0" max="100" value="80" />
+              <output id="volumeValue">80%</output>
+            </div>
+          </div>
+
+          <div class="sync-panel" id="syncPanel">
+            <div>
+              <strong id="qualityText">等待同步</strong>
+              <span>同步质量</span>
+            </div>
+            <div>
+              <strong id="driftText">-- ms</strong>
+              <span>播放偏差</span>
+            </div>
+            <div>
+              <strong id="latencyText">-- ms</strong>
+              <span>网络往返</span>
+            </div>
+            <div>
+              <strong id="rateText">1.000x</strong>
+              <span>微调速度</span>
+            </div>
+          </div>
+        </section>
       </section>
     </main>
+
+    <div class="modal hidden" id="eqModal" role="dialog" aria-modal="true" aria-labelledby="eqTitle">
+      <div class="modal-backdrop" id="eqCloseBackdrop"></div>
+      <section class="panel eq-dialog">
+        <div class="panel-head">
+          <h2 id="eqTitle">均衡器</h2>
+          <div class="dialog-actions">
+            <button id="eqResetBtn" type="button">重置</button>
+            <button id="eqCloseBtn" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="preset-grid" id="presetGrid">
+          <button class="preset active" type="button" data-preset="flat">原声</button>
+          <button class="preset" type="button" data-preset="megaBass">超低重音</button>
+          <button class="preset" type="button" data-preset="acoustic">弹唱会</button>
+          <button class="preset" type="button" data-preset="hifiLive">HIFI现场</button>
+          <button class="preset" type="button" data-preset="surround3d">5.1全景</button>
+          <button class="preset" type="button" data-preset="manual">手动</button>
+        </div>
+        <div class="eq hidden" id="eqManual">
+          <label>
+            <span>低音</span>
+            <input class="eq-slider" data-band="bass" type="range" min="-12" max="12" value="0" step="1" />
+            <output id="bassValue">0 dB</output>
+          </label>
+          <label>
+            <span>人声</span>
+            <input class="eq-slider" data-band="mid" type="range" min="-12" max="12" value="0" step="1" />
+            <output id="midValue">0 dB</output>
+          </label>
+          <label>
+            <span>高音</span>
+            <input class="eq-slider" data-band="treble" type="range" min="-12" max="12" value="0" step="1" />
+            <output id="trebleValue">0 dB</output>
+          </label>
+        </div>
+      </section>
+    </div>
 
     <audio id="player" preload="auto" crossorigin="anonymous"></audio>
     <script src="/app.js" type="module"></script>
