@@ -52,6 +52,7 @@ let deviceId = null;
 let controllerId = null;
 let devices = [];
 let autoPlayIndex = null;
+let endedAtTail = false;
 let localAudible = true;
 let audioContext;
 let mediaSource;
@@ -376,6 +377,7 @@ async function applyPlayback(message, force = false) {
   localAudible = message.audible !== false;
   player.muted = !localAudible;
   desiredPlaying = message.playing;
+  if (message.playing) endedAtTail = false;
   pendingPlayback = message;
   syncClock(message, force);
 
@@ -512,6 +514,7 @@ function applyVolume() {
 
 function selectTrack(index, autoPlay = false) {
   if (!isController || index < 0 || index >= playlist.length) return;
+  endedAtTail = false;
   autoPlayIndex = autoPlay ? index : null;
   send({ type: "select-track", index });
 }
@@ -539,6 +542,10 @@ async function playAsController() {
   try {
     initEqualizer();
     await audioContext?.resume();
+    if (endedAtTail || (player.duration && player.currentTime >= player.duration - 0.05)) {
+      player.currentTime = 0;
+      endedAtTail = false;
+    }
     await player.play();
     audioUnlocked = true;
     desiredPlaying = true;
@@ -623,6 +630,7 @@ modeButton.addEventListener("click", () => {
 
 seek.addEventListener("input", () => {
   if (!isController || !player.duration) return;
+  endedAtTail = false;
   player.currentTime = (Number(seek.value) / 1000) * player.duration;
   broadcastPlayback(true);
 });
@@ -650,6 +658,7 @@ player.addEventListener("ended", () => {
   if (playMode === "list") {
     const index = listModeNextIndex(1);
     if (index === -1) {
+      endedAtTail = true;
       desiredPlaying = false;
       player.pause();
       player.currentTime = player.duration || player.currentTime;
