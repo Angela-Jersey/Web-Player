@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>局域网同步音乐</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="topbar">
+        <div>
+          <h1>局域网同步音乐</h1>
+          <p id="addressText">同一 Wi-Fi 下打开这个地址即可加入播放。</p>
+        </div>
+        <div class="status" id="status">连接中</div>
+      </section>
+
+      <section class="stage">
+        <div class="dropzone" id="dropzone">
+          <input id="fileInput" type="file" accept="audio/*" />
+          <div class="disc" id="disc"></div>
+          <div>
+            <h2 id="trackName">上传一首音乐开始</h2>
+            <p id="trackMeta">支持 mp3、m4a、wav、ogg 等浏览器可播放格式</p>
+          </div>
+          <button id="chooseBtn" type="button">选择音频</button>
+        </div>
+
+        <div class="controls">
+          <button class="primary" id="playBtn" type="button" disabled>播放</button>
+          <button id="unlockBtn" type="button" disabled>启用声音</button>
+          <button id="syncBtn" type="button" disabled>重新同步</button>
+          <div class="time">
+            <span id="currentTime">0:00</span>
+            <input id="seek" type="range" min="0" max="1000" value="0" disabled />
+            <span id="duration">0:00</span>
+          </div>
+        </div>
+
+        <div class="sync-panel" id="syncPanel">
+          <div>
+            <strong id="qualityText">等待同步</strong>
+            <span>同步质量</span>
+          </div>
+          <div>
+            <strong id="driftText">-- ms</strong>
+            <span>播放偏差</span>
+          </div>
+          <div>
+            <strong id="latencyText">-- ms</strong>
+            <span>网络往返</span>
+          </div>
+          <div>
+            <strong id="rateText">1.000x</strong>
+            <span>微调速度</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="notes">
+        <div>
+          <strong>主控设备</strong>
+          <span>上传音频后点播放、暂停或拖动进度，其他设备会跟随。</span>
+        </div>
+        <div>
+          <strong>加入设备</strong>
+          <span>首次进入只点“启用声音”，之后会自动跟随主控校准。</span>
+        </div>
+      </section>
+    </main>
+
+    <audio id="player" preload="auto" crossorigin="anonymous"></audio>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
