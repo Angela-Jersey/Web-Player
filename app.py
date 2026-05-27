@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
 UPLOAD_DIR = ROOT / "uploads"
+LIBRARY_PATH = UPLOAD_DIR / "library.json"
 PORT = int(os.environ.get("PORT", "3000"))
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -26,9 +27,13 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 state_lock = threading.RLock()
 clients_lock = threading.Lock()
-clients: set[socket.socket] = set()
+clients: dict[socket.socket, dict] = {}
 state = {
     "audio": None,
+    "playlist": [],
+    "currentIndex": -1,
+    "playMode": "list",
+    "controllerId": None,
     "playing": False,
     "position": 0.0,
     "updatedAt": time.time(),
@@ -58,9 +63,14 @@ def state_message(kind: str = "state") -> dict:
         message = {
             "type": kind,
             "audio": state["audio"],
+            "playlist": state["playlist"],
+            "currentIndex": state["currentIndex"],
+            "playMode": state["playMode"],
+            "controllerId": state["controllerId"],
             "playing": state["playing"],
             "position": effective_position(),
             "serverTime": now_ms(),
+            "devices": devices_list(),
         }
     return message
 
@@ -79,7 +89,7 @@ def send_json(conn: socket.socket, payload: dict) -> None:
         conn.sendall(frame_text(payload))
     except OSError:
         with clients_lock:
-            clients.discard(conn)
+            clients.pop(conn, None)
 
 
 def broadcast(payload: dict, except_conn: socket.socket | None = None) -> None:
@@ -88,6 +98,37 @@ def broadcast(payload: dict, except_conn: socket.socket | None = None) -> None:
     for conn in targets:
         if conn is not except_conn:
             send_json(conn, payload)
+
+
+def devices_list() -> list[dict]:
+    with clients_lock:
+        return [
+            {
+                "id": info["id"],
+                "name": info["name"],
+                "enabled": info["enabled"],
+                "controller": info["id"] == state.get("controllerId"),
+                "joinedAt": info["joinedAt"],
+            }
+            for info in clients.values()
+        ]
+
+
+def broadcast_devices() -> None:
+    broadcast({"type": "devices", "devices": devices_list()})
+
+
+def playback_payload_for(enabled: bool) -> dict:
+    payload = state_message("playback")
+    payload["audible"] = enabled
+    return payload
+
+
+def broadcast_playback() -> None:
+    with clients_lock:
+        targets = list(clients.items())
+    for conn, info in targets:
+        send_json(conn, playback_payload_for(bool(info.get("enabled"))))
 
 
 def read_frame(conn: socket.socket) -> str | None:
@@ -119,10 +160,15 @@ def read_frame(conn: socket.socket) -> str | None:
     return data.decode("utf-8")
 
 
-def websocket_loop(conn: socket.socket) -> None:
+def websocket_loop(conn: socket.socket, device_info: dict) -> None:
     with clients_lock:
-        clients.add(conn)
+        clients[conn] = device_info
+    with state_lock:
+        if state["controllerId"] is None:
+            state["controllerId"] = device_info["id"]
+    send_json(conn, {"type": "hello", "deviceId": device_info["id"]})
     send_json(conn, state_message())
+    broadcast_devices()
     try:
         while True:
             text = read_frame(conn)
@@ -134,7 +180,11 @@ def websocket_loop(conn: socket.socket) -> None:
                 continue
 
             if message.get("type") == "sync-request":
-                send_json(conn, state_message())
+                with clients_lock:
+                    enabled = bool(clients.get(conn, {}).get("enabled", True))
+                payload = state_message()
+                payload["audible"] = enabled
+                send_json(conn, payload)
             elif message.get("type") == "ping":
                 send_json(
                     conn,
@@ -145,12 +195,123 @@ def websocket_loop(conn: socket.socket) -> None:
                     },
                 )
             elif message.get("type") == "playback":
+                if device_info["id"] != state.get("controllerId"):
+                    continue
                 set_playback(bool(message.get("playing")), float(message.get("position") or 0))
-                payload = state_message("playback")
+                broadcast_playback()
+            elif message.get("type") == "device-enabled":
+                device_id = str(message.get("id", ""))
+                enabled = bool(message.get("enabled"))
+                target_conn = None
+                with clients_lock:
+                    for client_conn, info in clients.items():
+                        if info["id"] == device_id:
+                            info["enabled"] = enabled
+                            target_conn = client_conn
+                            break
+                broadcast_devices()
+                if target_conn is not None:
+                    send_json(target_conn, playback_payload_for(enabled))
+            elif message.get("type") == "select-track":
+                if device_info["id"] != state.get("controllerId"):
+                    continue
+                with state_lock:
+                    index = int(message.get("index", -1))
+                    if 0 <= index < len(state["playlist"]):
+                        state["currentIndex"] = index
+                        state["audio"] = state["playlist"][index]
+                        state["playing"] = False
+                        state["position"] = 0.0
+                        state["updatedAt"] = time.time()
+                        payload = state_message("audio")
+                    else:
+                        payload = None
+                if payload:
+                    send_json(conn, payload)
+                    broadcast(payload, except_conn=conn)
+            elif message.get("type") == "delete-track":
+                if device_info["id"] != state.get("controllerId"):
+                    continue
+                with state_lock:
+                    index = int(message.get("index", -1))
+                    if 0 <= index < len(state["playlist"]):
+                        deleting_current = index == state["currentIndex"]
+                        removed = state["playlist"].pop(index)
+                        removed_file = track_file(removed)
+                        if removed_file.exists() and removed_file.is_relative_to(UPLOAD_DIR.resolve()):
+                            try:
+                                removed_file.unlink()
+                            except OSError:
+                                pass
+                        if not state["playlist"]:
+                            state["currentIndex"] = -1
+                            state["audio"] = None
+                            state["playing"] = False
+                            state["position"] = 0.0
+                        elif deleting_current:
+                            state["currentIndex"] = min(index, len(state["playlist"]) - 1)
+                            state["audio"] = state["playlist"][state["currentIndex"]]
+                            state["playing"] = False
+                            state["position"] = 0.0
+                        elif index < state["currentIndex"]:
+                            state["currentIndex"] -= 1
+                        state["updatedAt"] = time.time()
+                        save_library()
+                        payload = state_message("audio" if deleting_current else "playlist")
+                    else:
+                        payload = None
+                if payload:
+                    send_json(conn, payload)
+                    broadcast(payload, except_conn=conn)
+            elif message.get("type") == "reorder-track":
+                if device_info["id"] != state.get("controllerId"):
+                    continue
+                with state_lock:
+                    from_index = int(message.get("from", -1))
+                    to_index = int(message.get("to", -1))
+                    playlist = state["playlist"]
+                    if 0 <= from_index < len(playlist) and 0 <= to_index < len(playlist):
+                        track = playlist.pop(from_index)
+                        playlist.insert(to_index, track)
+                        if state["currentIndex"] == from_index:
+                            state["currentIndex"] = to_index
+                        elif from_index < state["currentIndex"] <= to_index:
+                            state["currentIndex"] -= 1
+                        elif to_index <= state["currentIndex"] < from_index:
+                            state["currentIndex"] += 1
+                        if 0 <= state["currentIndex"] < len(playlist):
+                            state["audio"] = playlist[state["currentIndex"]]
+                        save_library()
+                        payload = state_message("playlist")
+                    else:
+                        payload = None
+                if payload:
+                    send_json(conn, payload)
+                    broadcast(payload, except_conn=conn)
+            elif message.get("type") == "play-mode":
+                if device_info["id"] != state.get("controllerId"):
+                    continue
+                mode = message.get("mode")
+                if mode in {"list", "sequence", "random", "repeat-one"}:
+                    with state_lock:
+                        state["playMode"] = mode
+                    payload = state_message("mode")
+                    send_json(conn, payload)
+                    broadcast(payload, except_conn=conn)
+            elif message.get("type") == "claim-controller":
+                with state_lock:
+                    state["controllerId"] = device_info["id"]
+                payload = state_message("state")
+                send_json(conn, payload)
                 broadcast(payload, except_conn=conn)
+                broadcast_devices()
     finally:
         with clients_lock:
-            clients.discard(conn)
+            clients.pop(conn, None)
+        with state_lock:
+            if state.get("controllerId") == device_info["id"]:
+                state["controllerId"] = None
+        broadcast_devices()
         try:
             conn.close()
         except OSError:
@@ -161,6 +322,80 @@ def safe_upload_name(original_name: str) -> str:
     suffix = Path(original_name).suffix.lower() or ".mp3"
     safe_suffix = suffix if re.match(r"^\.[a-z0-9]{1,8}$", suffix) else ".mp3"
     return f"{int(time.time() * 1000)}-{os.urandom(4).hex()}{safe_suffix}"
+
+
+def media_url(filename: str) -> str:
+    return f"/media/{quote(filename.rsplit('.', 1)[0])}"
+
+
+def track_file(track: dict) -> Path:
+    return (UPLOAD_DIR / str(track.get("id", ""))).resolve()
+
+
+def track_from_file(file_path: Path, saved: dict | None = None) -> dict:
+    name = saved.get("name") if saved else file_path.name
+    content_type = saved.get("type") if saved else mimetypes.guess_type(file_path.name)[0]
+    return {
+        "id": file_path.name,
+        "url": media_url(file_path.name),
+        "name": name or file_path.name,
+        "type": content_type or "audio/mpeg",
+        "size": file_path.stat().st_size,
+    }
+
+
+def load_library() -> list[dict]:
+    saved_by_id = {}
+    if LIBRARY_PATH.exists():
+        try:
+            data = json.loads(LIBRARY_PATH.read_text(encoding="utf-8"))
+            saved_by_id = {item.get("id"): item for item in data.get("tracks", []) if item.get("id")}
+        except (OSError, json.JSONDecodeError):
+            saved_by_id = {}
+
+    tracks = []
+    known = set()
+    for saved in saved_by_id.values():
+        file_path = (UPLOAD_DIR / saved["id"]).resolve()
+        if file_path.exists() and file_path.is_file() and file_path.is_relative_to(UPLOAD_DIR.resolve()):
+            tracks.append(track_from_file(file_path, saved))
+            known.add(file_path.name)
+
+    for file_path in sorted(UPLOAD_DIR.iterdir(), key=lambda item: item.stat().st_mtime):
+        if file_path.name == LIBRARY_PATH.name or not file_path.is_file() or file_path.name in known:
+            continue
+        guessed_type = mimetypes.guess_type(file_path.name)[0] or ""
+        if guessed_type.startswith("audio/"):
+            tracks.append(track_from_file(file_path))
+
+    return tracks
+
+
+def save_library() -> None:
+    with state_lock:
+        data = {"tracks": state["playlist"]}
+    LIBRARY_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def find_duplicate_track(name: str, size: int) -> int:
+    with state_lock:
+        for index, track in enumerate(state["playlist"]):
+            if track.get("name") == name and int(track.get("size") or -1) == size:
+                if track_file(track).exists():
+                    return index
+    return -1
+
+
+def initialize_library() -> None:
+    tracks = load_library()
+    with state_lock:
+        state["playlist"] = tracks
+        state["currentIndex"] = 0 if tracks else -1
+        state["audio"] = tracks[0] if tracks else None
+        state["playing"] = False
+        state["position"] = 0.0
+        state["updatedAt"] = time.time()
+    save_library()
 
 
 def lan_urls() -> list[str]:
@@ -184,6 +419,23 @@ def likely_phone_url(urls: list[str]) -> str | None:
         if url.startswith("http://10.") or url.startswith("http://172."):
             return url
     return urls[0] if urls else None
+
+
+def device_name(user_agent: str, address: tuple) -> str:
+    ua = user_agent.lower()
+    if "iphone" in ua:
+        kind = "iPhone"
+    elif "ipad" in ua:
+        kind = "iPad"
+    elif "android" in ua:
+        kind = "Android"
+    elif "windows" in ua:
+        kind = "Windows"
+    elif "mac" in ua:
+        kind = "Mac"
+    else:
+        kind = "设备"
+    return f"{kind} {address[0]}"
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -216,16 +468,28 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         original_name = unquote(self.headers.get("X-File-Name", "audio"))
-        filename = safe_upload_name(original_name)
-        target = UPLOAD_DIR / filename
-        target.write_bytes(self.rfile.read(length))
+        content = self.rfile.read(length)
+        duplicate_index = find_duplicate_track(original_name, length)
 
         with state_lock:
-            state["audio"] = {
-                "url": f"/uploads/{quote(filename)}",
-                "name": original_name,
-                "type": self.headers.get("Content-Type", "audio/mpeg"),
-            }
+            if duplicate_index >= 0:
+                state["currentIndex"] = duplicate_index
+                track = state["playlist"][duplicate_index]
+            else:
+                filename = safe_upload_name(original_name)
+                target = UPLOAD_DIR / filename
+                target.write_bytes(content)
+                track = {
+                    "id": filename,
+                    "url": media_url(filename),
+                    "name": original_name,
+                    "type": self.headers.get("Content-Type", "audio/mpeg"),
+                    "size": len(content),
+                }
+                state["playlist"].append(track)
+                state["currentIndex"] = len(state["playlist"]) - 1
+                save_library()
+            state["audio"] = track
             state["playing"] = False
             state["position"] = 0.0
             state["updatedAt"] = time.time()
@@ -248,6 +512,13 @@ class Handler(SimpleHTTPRequestHandler):
             if not target.is_relative_to(UPLOAD_DIR.resolve()):
                 return str((UPLOAD_DIR / "__not_found__").resolve())
             return str(target)
+        if path_part.startswith("/media/"):
+            media_id = path_part.removeprefix("/media/")
+            matches = list(UPLOAD_DIR.glob(f"{media_id}.*"))
+            target = matches[0].resolve() if matches else (UPLOAD_DIR / "__not_found__").resolve()
+            if not target.is_relative_to(UPLOAD_DIR.resolve()):
+                return str((UPLOAD_DIR / "__not_found__").resolve())
+            return str(target)
         if path_part == "/":
             path_part = "/index.html"
         relative = path_part.lstrip("/")
@@ -265,6 +536,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Accept-Ranges", "bytes")
+        if self.path.startswith(("/media/", "/uploads/")):
+            self.send_header("Content-Disposition", "inline")
+            self.send_header("X-Content-Type-Options", "nosniff")
+        if self.path.endswith((".html", ".js", ".css")) or self.path == "/":
+            self.send_header("Cache-Control", "no-store, max-age=0")
         super().end_headers()
 
     def handle_websocket(self) -> None:
@@ -278,8 +554,14 @@ class Handler(SimpleHTTPRequestHandler):
 
         conn = self.connection
         self.close_connection = True
+        device_info = {
+            "id": os.urandom(6).hex(),
+            "name": device_name(self.headers.get("User-Agent", ""), self.client_address),
+            "enabled": True,
+            "joinedAt": now_ms(),
+        }
         try:
-            websocket_loop(conn)
+            websocket_loop(conn, device_info)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
             pass
 
@@ -288,6 +570,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    initialize_library()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"本机: http://localhost:{PORT}")
     urls = lan_urls()
