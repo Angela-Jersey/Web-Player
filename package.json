@@ -1,0 +1,9 @@
+{
+  "name": "lan-sync-audio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "python app.py"
+  }
+}
